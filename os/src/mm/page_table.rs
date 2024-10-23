@@ -156,7 +156,7 @@ impl PageTable {
     #[allow(unused)]
     /// Doc
     pub fn map_with_flags(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, _port: usize) {
-        let mut flags = PTEFlags::U | PTEFlags::V;
+        let mut flags = PTEFlags::U;
         if _port & 1 != 0 {
             flags |= PTEFlags::R;
         }
@@ -192,4 +192,37 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
         start = end_va.into();
     }
     v
+}
+
+/// Translate & map if non-exist
+pub fn translate_validate(token: usize, ptr: *const u8, len: usize) -> Option<Vec<&'static mut [u8]>> {
+    let mut page_table = PageTable::from_token(token);
+    let mut start = ptr as usize;
+    let end = start + len;
+    let mut v = Vec::new();
+
+    let flag = page_table.translate(VirtAddr::from(start).floor())?.flags();
+
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let mut vpn = start_va.floor();
+        let ppn = page_table.translate(vpn).or_else(|| {
+            let ppf = frame_alloc()?;
+            page_table.map(vpn, ppf.ppn, flag);
+            page_table.commit(ppf);
+
+            page_table.translate(vpn)
+        }).map(|pte| pte.ppn())?;
+        vpn.step();
+        let mut end_va: VirtAddr = vpn.into();
+        end_va = end_va.min(VirtAddr::from(end));
+        if end_va.page_offset() == 0 {
+            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..]);
+        } else {
+            v.push(&mut ppn.get_bytes_array()[start_va.page_offset()..end_va.page_offset()]);
+        }
+        start = end_va.into();
+    }
+
+    Some(v)
 }

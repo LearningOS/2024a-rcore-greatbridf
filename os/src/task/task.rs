@@ -104,6 +104,11 @@ impl TaskControlBlock {
             None
         }
     }
+
+    /// Get the memory set of the task
+    pub fn get_mm_set(&mut self) -> &mut MemorySet {
+        &mut self.memory_set
+    }
 }
 
 #[derive(Copy, Clone, PartialEq)]
