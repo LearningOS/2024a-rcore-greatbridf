@@ -1,9 +1,16 @@
 //! Process management syscalls
+use core::mem::MaybeUninit;
+
+use alloc::{boxed::Box, vec::Vec};
+
 use crate::{
     config::MAX_SYSCALL_NUM,
+    mm::{frame_alloc, translated_byte_buffer, PageTable, SimpleRange, VirtAddr},
     task::{
-        change_program_brk, exit_current_and_run_next, suspend_current_and_run_next, TaskStatus,
+        change_program_brk, current_user_token, exit_current_and_run_next,
+        suspend_current_and_run_next, with_current_tcb, TaskStatus,
     },
+    timer::{get_time_ms, get_time_us},
 };
 
 #[repr(C)]
@@ -38,32 +45,143 @@ pub fn sys_yield() -> isize {
     0
 }
 
+fn copy_to_buffers<T: Sized>(data: &T, buffers: Vec<&'static mut [u8]>) {
+    let buffers_len = buffers.iter().map(|b| b.len()).sum::<usize>();
+    assert_eq!(buffers_len, core::mem::size_of::<T>());
+
+    let mut pdata = data as *const T as *const u8;
+    for buffer in buffers {
+        let data = unsafe { core::slice::from_raw_parts(pdata, buffer.len()) };
+        buffer.copy_from_slice(data);
+
+        pdata = unsafe { pdata.add(buffer.len()) };
+    }
+}
+
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
     trace!("kernel: sys_get_time");
-    -1
+    let mut cur_time = TimeVal { sec: 0, usec: 0 };
+
+    let cur_time_us = get_time_us();
+    cur_time.sec = cur_time_us / 1_000_000;
+    cur_time.usec = cur_time_us % 1_000_000;
+
+    let buffers = translated_byte_buffer(
+        current_user_token(),
+        _ts as *const _,
+        core::mem::size_of::<TimeVal>(),
+    );
+
+    copy_to_buffers(&cur_time, buffers);
+
+    0
 }
 
 /// YOUR JOB: Finish sys_task_info to pass testcases
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TaskInfo`] is splitted by two pages ?
 pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
-    trace!("kernel: sys_task_info NOT IMPLEMENTED YET!");
-    -1
+    trace!("kernel: sys_task_info!");
+    let mut info: Box<MaybeUninit<TaskInfo>> = Box::new(MaybeUninit::zeroed());
+
+    with_current_tcb(|current| {
+        let info = unsafe { info.assume_init_mut() };
+        info.status = current.task_status;
+        info.syscall_times = current.syscall_times;
+        info.time = get_time_ms() - current.time.expect("sys_task_info: wtf");
+    });
+
+    let buffers = translated_byte_buffer(
+        current_user_token(),
+        _ti as *const _,
+        core::mem::size_of::<TaskInfo>(),
+    );
+
+    copy_to_buffers(unsafe { info.assume_init_ref() }, buffers);
+
+    0
 }
 
 // YOUR JOB: Implement mmap.
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!("kernel: sys_mmap NOT IMPLEMENTED YET!");
-    -1
+    trace!("kernel: sys_mmap");
+    let start: VirtAddr = _start.into();
+    if !start.aligned() {
+        return -1;
+    }
+
+    if _port & !0x7 != 0 || _port & 0x7 == 0 {
+        return -1;
+    }
+
+    let end: VirtAddr = (_start + _len).into();
+
+    let start_pfn = start.floor();
+    let end_pfn = end.ceil();
+
+    let mut page_table = PageTable::from_token(current_user_token());
+
+    let busy = SimpleRange::new(start_pfn, end_pfn)
+        .into_iter()
+        .any(|vpn| page_table.translate(vpn).is_some());
+
+    if busy {
+        return -1;
+    }
+
+    let frames = SimpleRange::new(start_pfn, end_pfn)
+        .into_iter()
+        .map(|_| frame_alloc().ok_or(-1))
+        .collect::<Result<Vec<_>, isize>>();
+
+    let frames = match frames {
+        Err(_) => return -1,
+        Ok(frames) => frames,
+    };
+
+    for (vpn, ppf) in SimpleRange::new(start_pfn, end_pfn)
+        .into_iter()
+        .zip(frames.into_iter())
+    {
+        page_table.map_with_flags(vpn, ppf.ppn, _port);
+        page_table.commit(ppf);
+    }
+
+    0
 }
 
 // YOUR JOB: Implement munmap.
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!("kernel: sys_munmap NOT IMPLEMENTED YET!");
-    -1
+    trace!("kernel: sys_munmap");
+
+    let start: VirtAddr = _start.into();
+    if !start.aligned() {
+        return -1;
+    }
+
+    let end: VirtAddr = (_start + _len).into();
+
+    let start_pfn = start.floor();
+    let end_pfn = end.ceil();
+
+    let mut page_table = PageTable::from_token(current_user_token());
+
+    let not_full = SimpleRange::new(start_pfn, end_pfn)
+        .into_iter()
+        .any(|vpn| page_table.translate(vpn).is_none());
+
+    if not_full {
+        return -1;
+    }
+
+    for vpn in SimpleRange::new(start_pfn, end_pfn).into_iter() {
+        page_table.unmap(vpn);
+    }
+
+    0
 }
 /// change data segment size
 pub fn sys_sbrk(size: i32) -> isize {

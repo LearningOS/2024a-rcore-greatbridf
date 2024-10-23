@@ -147,6 +147,28 @@ impl PageTable {
     pub fn token(&self) -> usize {
         8usize << 60 | self.root_ppn.0
     }
+
+    /// Commit a frame to the page table
+    pub fn commit(&mut self, pf: FrameTracker) {
+        self.frames.push(pf);
+    }
+
+    #[allow(unused)]
+    /// Doc
+    pub fn map_with_flags(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, _port: usize) {
+        let mut flags = PTEFlags::U | PTEFlags::V;
+        if _port & 1 != 0 {
+            flags |= PTEFlags::R;
+        }
+        if _port & 2 != 0 {
+            flags |= PTEFlags::W;
+        }
+        if _port & 4 != 0 {
+            flags |= PTEFlags::X;
+        }
+
+        self.map(vpn, ppn, flags);
+    }
 }
 
 /// Translate&Copy a ptr[u8] array with LENGTH len to a mutable u8 Vec through page table
