@@ -5,7 +5,7 @@ use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
     config::MAX_SYSCALL_NUM,
-    mm::{translate_validate, MapPermission, PageTable, SimpleRange, VirtAddr},
+    mm::{translate_validate, MapPermission, VirtAddr},
     task::{
         change_program_brk, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next, with_current_tcb, TaskStatus,
@@ -40,7 +40,6 @@ pub fn sys_exit(_exit_code: i32) -> ! {
 
 /// current task gives up resources for other tasks
 pub fn sys_yield() -> isize {
-    trace!("kernel: sys_yield");
     suspend_current_and_run_next();
     0
 }
@@ -62,8 +61,6 @@ fn copy_to_buffers<T: Sized>(data: &T, buffers: Vec<&'static mut [u8]>) {
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!("kernel: sys_get_time");
-
     let buffers = translate_validate(
         current_user_token(),
         _ts as *const _,
@@ -120,80 +117,45 @@ pub fn sys_task_info(_ti: *mut TaskInfo) -> isize {
 
 // YOUR JOB: Implement mmap.
 pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!("kernel: sys_mmap");
-    let start: VirtAddr = _start.into();
+    trace!("kernel: sys_mmap, tid: {}", current_user_token());
+    let start = VirtAddr::from(_start);
+    let end = VirtAddr::from(_start + _len);
+
     if !start.aligned() {
         return -1;
     }
 
-    if _port & !0x7 != 0 || _port & 0x7 == 0 {
+    if _port & !0x7 != 0 {
         return -1;
     }
 
-    let end: VirtAddr = (_start + _len).into();
-
-    let start_pfn = start.floor();
-    let end_pfn = end.ceil();
-
-    let page_table = PageTable::from_token(current_user_token());
-
-    let busy = SimpleRange::new(start_pfn, end_pfn).into_iter().any(|vpn| {
-        page_table
-            .translate(vpn)
-            .map(|pte| pte.is_valid())
-            .unwrap_or(false)
-    });
-
-    if busy {
-        return -1;
-    }
+    let flag: MapPermission =
+        MapPermission::from_bits_truncate((_port << 1) as u8) | MapPermission::U;
 
     with_current_tcb(|current| {
         let mms = current.get_mm_set();
-        let flag: MapPermission =
-            MapPermission::from_bits_truncate((_port << 1) as u8) | MapPermission::U;
-        mms.insert_framed_area(start, end, flag);
-    });
-
-    0
+        mms.mmap_checked(start, end, flag)
+    }).map_or(-1, |_| 0)
 }
 
 // YOUR JOB: Implement munmap.
 pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!("kernel: sys_munmap");
+    trace!("kernel: sys_munmap, tid: {}", current_user_token());
+    let start = VirtAddr::from(_start);
+    let end = VirtAddr::from(_start + _len);
 
-    let start: VirtAddr = _start.into();
     if !start.aligned() {
-        println!("not aligned");
         return -1;
     }
 
-    let end: VirtAddr = (_start + _len).into();
+    trace!("munmap: _start: {:x}, _len: {:x}", _start, _len);
+    trace!("munmap: start: {:?}, end: {:?}", start.floor(), end.ceil());
 
-    let start_pfn = start.floor();
-    let end_pfn = end.ceil();
-
-    let mut page_table = PageTable::from_token(current_user_token());
-
-    let not_full = SimpleRange::new(start_pfn, end_pfn).into_iter().any(|vpn| {
-        let pte = page_table.translate(vpn);
-        match pte {
-            Some(pte) => !pte.is_valid(),
-            None => true,
-        }
-    });
-
-    if not_full {
-        println!("start{:?}, end{:?}, not full", start_pfn, end_pfn);
-        return -1;
-    }
-
-    for vpn in SimpleRange::new(start_pfn, end_pfn).into_iter() {
-        println!("unmap {:?}", vpn);
-        page_table.unmap(vpn);
-    }
-
-    0
+    with_current_tcb(|current| {
+        let mms = current.get_mm_set();
+        mms.unmap_checked(start, end)
+    })
+    .map_or(-1, |_| 0)
 }
 /// change data segment size
 pub fn sys_sbrk(size: i32) -> isize {

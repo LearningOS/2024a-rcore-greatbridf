@@ -204,10 +204,10 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 }
 
 /// Some __doc__
-pub fn with_current_tcb<F: FnOnce(&mut TaskControlBlock)>(callback: F) {
+pub fn with_current_tcb<Ret, F: FnOnce(&mut TaskControlBlock) -> Ret>(callback: F) -> Ret {
     let mut inner = TASK_MANAGER.inner.exclusive_access();
     let current = inner.current_task;
-    callback(&mut inner.tasks[current]);
+    callback(&mut inner.tasks[current])
 }
 
 /// Change the current 'Running' task's program break
