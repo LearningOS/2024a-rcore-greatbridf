@@ -181,6 +181,17 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     v
 }
 
+/// Translate&Copy a ptr[u8] array with LENGTH len to a &mut [u8] Iterator through page table
+pub fn translated_byte_iterator(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+) -> impl Iterator<Item = &'static mut u8> {
+    translated_byte_buffer(token, ptr, len)
+        .into_iter()
+        .flatten()
+}
+
 /// Translate&Copy a ptr[u8] array end with `\0` to a `String` Vec through page table
 pub fn translated_str(token: usize, ptr: *const u8) -> String {
     let page_table = PageTable::from_token(token);

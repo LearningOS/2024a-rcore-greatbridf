@@ -1,7 +1,7 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
@@ -71,12 +71,26 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Count of yscall called by the process
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+
+    /// The timestamp when the process is scheduled for the first time
+    pub time_start: Option<usize>,
+
+    /// 'Length' the process has run
+    pub stride: usize,
+
+    /// 'Length' added each time the process runs
+    pub pass: usize,
 }
 
 impl TaskControlBlockInner {
+    /// get the trap context
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         self.trap_cx_ppn.get_mut()
     }
+    /// get the user token
     pub fn get_user_token(&self) -> usize {
         self.memory_set.token()
     }
@@ -135,6 +149,10 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    time_start: None,
+                    stride: 0,
+                    pass: 16,
                 })
             },
         };
@@ -165,6 +183,12 @@ impl TaskControlBlock {
         inner.memory_set = memory_set;
         // update trap_cx ppn
         inner.trap_cx_ppn = trap_cx_ppn;
+        // initialize base_size
+        inner.base_size = user_sp;
+        // initialize syscall_times
+        inner.syscall_times = [0; MAX_SYSCALL_NUM];
+        // initialize time_start
+        inner.time_start = None;
         // initialize trap_cx
         let trap_cx = TrapContext::app_init_context(
             entry_point,
@@ -216,6 +240,10 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    syscall_times: parent_inner.syscall_times, // TODO: check whether to reset
+                    time_start: None,
+                    stride: parent_inner.stride,
+                    pass: parent_inner.pass,
                 })
             },
         });

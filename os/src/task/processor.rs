@@ -7,7 +7,9 @@
 use super::__switch;
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
+use crate::mm::{CheckError, MapPermission, VirtAddr};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
 use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
@@ -61,6 +63,9 @@ pub fn run_tasks() {
             let mut task_inner = task.inner_exclusive_access();
             let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
             task_inner.task_status = TaskStatus::Running;
+            if matches!(task_inner.time_start, None) {
+                task_inner.time_start = Some(get_time_ms());
+            }
             // release coming task_inner manually
             drop(task_inner);
             // release coming task TCB manually
@@ -84,6 +89,19 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
 /// Get a copy of the current task
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
     PROCESSOR.exclusive_access().current()
+}
+
+/// Check the access permission in the current task memory set
+pub fn current_check_access(
+    start: VirtAddr,
+    end: VirtAddr,
+    permission: MapPermission,
+) -> Result<(), CheckError> {
+    current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .memory_set
+        .check_access(start, end, permission)
 }
 
 /// Get the current user token(addr of page table)
