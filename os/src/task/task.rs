@@ -110,6 +110,14 @@ impl TaskControlBlockInner {
     }
 }
 
+impl TaskControlBlockInner {
+    /// No checks done
+    pub fn set_priority(&mut self, priority: usize) {
+        const BIG_STRIDE: usize = 1_000_000_007;
+        self.pass = BIG_STRIDE / priority;
+    }
+}
+
 impl TaskControlBlock {
     /// Create a new process
     ///
@@ -152,10 +160,12 @@ impl TaskControlBlock {
                     syscall_times: [0; MAX_SYSCALL_NUM],
                     time_start: None,
                     stride: 0,
-                    pass: 16,
+                    pass: 0,
                 })
             },
         };
+        task_control_block.inner_exclusive_access().set_priority(16);
+
         // prepare TrapContext in user space
         let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
         *trap_cx = TrapContext::app_init_context(

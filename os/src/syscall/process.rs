@@ -313,7 +313,7 @@ pub fn sys_set_priority(_prio: isize) -> isize {
     }
     let prio = _prio as usize;
 
-    current_task().unwrap().inner_exclusive_access().pass = prio;
+    current_task().unwrap().inner_exclusive_access().set_priority(prio);
 
     _prio
 }
