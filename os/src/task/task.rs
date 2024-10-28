@@ -1,7 +1,7 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
@@ -68,6 +68,18 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Count of yscall called by the process
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+
+    /// The timestamp when the process is scheduled for the first time
+    pub time_start: Option<usize>,
+
+    /// 'Length' the process has run
+    pub stride: usize,
+
+    /// 'Length' added each time the process runs
+    pub pass: usize,
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +130,10 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    time_start: None,
+                    stride: 0,
+                    pass: 16,
                 })
             },
         };
@@ -150,6 +166,10 @@ impl TaskControlBlock {
         inner.trap_cx_ppn = trap_cx_ppn;
         // initialize base_size
         inner.base_size = user_sp;
+        // initialize syscall_times
+        inner.syscall_times = [0; MAX_SYSCALL_NUM];
+        // initialize time_start
+        inner.time_start = None;
         // initialize trap_cx
         let trap_cx = inner.get_trap_cx();
         *trap_cx = TrapContext::app_init_context(
@@ -191,6 +211,10 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    syscall_times: parent_inner.syscall_times, // TODO: check whether to reset
+                    time_start: None,
+                    stride: parent_inner.stride,
+                    pass: parent_inner.pass,
                 })
             },
         });
