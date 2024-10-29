@@ -5,6 +5,7 @@ use super::{
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use log::trace;
 use spin::{Mutex, MutexGuard};
 /// Virtual filesystem layer over easy-fs
 pub struct Inode {
@@ -246,43 +247,57 @@ impl Inode {
     }
 
     /// Unlink `inode` from current inode
-    pub fn unlink(&self, name: &str) {
+    pub fn unlink(&self, name: &str, inode: Arc<Inode>) {
         let mut fs = self.fs.lock();
-        let inode = match self.find(name) {
-            Some(inode) => inode,
-            None => return,
-        };
 
         let should_free = inode.modify_disk_inode(|orig_inode| orig_inode.decrease_nlink());
+        block_cache_sync_all();
 
-        self.modify_disk_inode(|root_inode| {
+        trace!("unlink: should_free = {}", should_free);
+
+        self.modify_disk_inode(|dir_inode| {
             // remove file in the dirent
-            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let file_count = (dir_inode.size as usize) / DIRENT_SZ;
             let files = (0..file_count)
                 .filter_map(|idx| {
                     let mut entry = DirEntry::empty();
-                    root_inode.read_at(idx * DIRENT_SZ, entry.as_bytes_mut(), &self.block_device);
+                    dir_inode.read_at(idx * DIRENT_SZ, entry.as_bytes_mut(), &self.block_device);
 
-                    (entry.name() == name).then_some(entry)
+                    (entry.name() != name).then_some(entry)
                 })
                 .collect::<Vec<_>>();
 
+            trace!("unlink: files.len() = {}", files.len());
+
             // clear and rewrite, very slow
-            for block in root_inode.clear_size(&self.block_device).into_iter() {
+            for block in dir_inode.clear_size(&self.block_device).into_iter() {
                 fs.dealloc_data(block);
             }
 
+            trace!("unlink: clear done");
+
             // increase size
-            self.increase_size((files.len() * DIRENT_SZ) as u32, root_inode, &mut fs);
+            self.increase_size((files.len() * DIRENT_SZ) as u32, dir_inode, &mut fs);
             // write dirent
             for (idx, file) in files.iter().enumerate() {
-                root_inode.write_at(idx * DIRENT_SZ, file.as_bytes(), &self.block_device);
+                dir_inode.write_at(idx * DIRENT_SZ, file.as_bytes(), &self.block_device);
             }
+
+            trace!("unlink: dirents written");
         });
 
         if should_free {
+            inode.modify_disk_inode(|inode| {
+                let data_blocks_dealloc = inode.clear_size(&self.block_device);
+                for data_block in data_blocks_dealloc.into_iter() {
+                    fs.dealloc_data(data_block);
+                }
+            });
+
             fs.dealloc_inode(inode.ino());
         }
+
+        trace!("unlink: freed");
 
         block_cache_sync_all();
         // release efs lock automatically by compiler

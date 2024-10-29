@@ -10,7 +10,7 @@ use crate::{
     mm::{translated_byte_iterator, translated_refmut, translated_str, MapPermission, VirtAddr},
     task::{
         add_task, current_check_access, current_task, current_user_token,
-        exit_current_and_run_next, suspend_current_and_run_next, TaskControlBlock, TaskStatus,
+        exit_current_and_run_next, suspend_current_and_run_next, TaskStatus,
     },
     timer::{get_time_ms, get_time_us},
 };
@@ -276,48 +276,24 @@ pub fn sys_sbrk(size: i32) -> isize {
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(_path: *const u8) -> isize {
-    match (|| -> Result<_, ()> {
-        let path = translated_str(current_user_token(), _path);
+    let current_task = current_task().unwrap();
+    let new_task = current_task.fork();
+    let new_pid = new_task.pid.0;
 
-        trace!(
-            "kernel:pid[{}] sys_spawn {}",
-            current_task().unwrap().pid.0,
-            path
-        );
+    new_task.exec(
+        open_file(
+            translated_str(current_user_token(), _path).as_str(),
+            OpenFlags::RDONLY,
+        )
+        .unwrap()
+        .read_all()
+        .as_slice(),
+    );
 
-        let app = open_file(path.as_str(), OpenFlags::RDONLY).ok_or(())?;
-        let app = app.read_all();
+    // add new task to scheduler
+    add_task(new_task);
 
-        println!(
-            "kernel:pid[{}] sys_spawn filelen: {}",
-            current_task().unwrap().pid.0,
-            app.len()
-        );
-
-        let task = Arc::new(TaskControlBlock::new(app.as_slice()));
-
-        let pid = task.pid.0;
-
-        // add to child list
-        let current = current_task().unwrap();
-        current.inner_exclusive_access().children.push(task.clone());
-
-        task.inner_exclusive_access().parent = Some(Arc::downgrade(&current));
-
-        add_task(task);
-
-        Ok(pid)
-    })() {
-        Ok(n) => n as isize,
-        Err(err) => {
-            trace!(
-                "kernel:pid[{}] sys_spawn failed {:?}",
-                current_task().unwrap().pid.0,
-                err,
-            );
-            -1
-        }
-    }
+    new_pid as isize
 }
 
 // YOUR JOB: Set task priority.

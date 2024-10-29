@@ -81,17 +81,17 @@ pub fn sys_close(fd: usize) -> isize {
 /// YOUR JOB: Implement fstat.
 pub fn sys_fstat(fd: usize, st: *mut Stat) -> isize {
     trace!("kernel:pid[{}] sys_fstat", current_task().unwrap().pid.0);
+
+    let start = VirtAddr::from(st as usize);
+    let end = VirtAddr::from(st as usize + core::mem::size_of::<Stat>());
+    if current_check_access(start, end, MapPermission::W | MapPermission::U).is_err() {
+        return -1;
+    }
+
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
-        return -1;
-    }
-
-    let start = VirtAddr::from(st as usize);
-    let end = VirtAddr::from(st as usize + core::mem::size_of::<Stat>());
-
-    if current_check_access(start, end, MapPermission::W | MapPermission::U).is_err() {
         return -1;
     }
 
@@ -134,8 +134,10 @@ pub fn sys_unlinkat(name: *const u8) -> Result<(), ()> {
 
     // assume that pwd is fs root
     let pwd = get_root_inode();
-    pwd.find(&name).ok_or(())?;
-    pwd.unlink(&name);
+    let inode = pwd.find(&name).ok_or(())?;
+    trace!("kernel:pid[{}] sys_unlinkat: found", current_task().unwrap().pid.0);
+
+    pwd.unlink(&name, inode);
 
     Ok(())
 }
