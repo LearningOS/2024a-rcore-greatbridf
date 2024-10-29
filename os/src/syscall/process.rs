@@ -7,7 +7,6 @@ use alloc::{boxed::Box, sync::Arc};
 use crate::{
     config::MAX_SYSCALL_NUM,
     fs::{open_file, OpenFlags},
-    loader::get_app_data_by_name,
     mm::{translated_byte_iterator, translated_refmut, translated_str, MapPermission, VirtAddr},
     task::{
         add_task, current_check_access, current_task, current_user_token,
@@ -93,9 +92,14 @@ pub fn sys_fork() -> isize {
 }
 
 pub fn sys_exec(path: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_exec", current_task().unwrap().pid.0);
     let token = current_user_token();
     let path = translated_str(token, path);
+    trace!(
+        "kernel:pid[{}] sys_exec {}",
+        current_task().unwrap().pid.0,
+        path
+    );
+
     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
@@ -272,18 +276,33 @@ pub fn sys_sbrk(size: i32) -> isize {
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
 pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!("kernel:pid[{}] sys_spawn", current_task().unwrap().pid.0);
     match (|| -> Result<_, ()> {
         let path = translated_str(current_user_token(), _path);
-        let app = get_app_data_by_name(path.as_str()).ok_or(())?;
 
-        let task = Arc::new(TaskControlBlock::new(app));
+        trace!(
+            "kernel:pid[{}] sys_spawn {}",
+            current_task().unwrap().pid.0,
+            path
+        );
+
+        let app = open_file(path.as_str(), OpenFlags::RDONLY).ok_or(())?;
+        let app = app.read_all();
+
+        println!(
+            "kernel:pid[{}] sys_spawn filelen: {}",
+            current_task().unwrap().pid.0,
+            app.len()
+        );
+
+        let task = Arc::new(TaskControlBlock::new(app.as_slice()));
 
         let pid = task.pid.0;
 
         // add to child list
         let current = current_task().unwrap();
         current.inner_exclusive_access().children.push(task.clone());
+
+        task.inner_exclusive_access().parent = Some(Arc::downgrade(&current));
 
         add_task(task);
 
@@ -313,7 +332,10 @@ pub fn sys_set_priority(_prio: isize) -> isize {
     }
     let prio = _prio as usize;
 
-    current_task().unwrap().inner_exclusive_access().set_priority(prio);
+    current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .set_priority(prio);
 
     _prio
 }

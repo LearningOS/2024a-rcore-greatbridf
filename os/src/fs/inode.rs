@@ -4,10 +4,10 @@
 //!
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
-use super::File;
-use crate::drivers::BLOCK_DEVICE;
+use super::{File, Stat};
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
+use crate::{drivers::BLOCK_DEVICE, fs::StatMode};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bitflags::*;
@@ -59,6 +59,11 @@ lazy_static! {
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
         Arc::new(EasyFileSystem::root_inode(&efs))
     };
+}
+
+/// Get the root inode
+pub fn get_root_inode() -> Arc<Inode> {
+    ROOT_INODE.clone()
 }
 
 /// List all apps in the root directory
@@ -119,6 +124,7 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
             if flags.contains(OpenFlags::TRUNC) {
                 inode.clear();
             }
+            println!("filename: {}, ino: {}", name, inode.ino());
             Arc::new(OSInode::new(readable, writable, inode))
         })
     }
@@ -154,5 +160,21 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+
+    fn stat(&self, stat: &mut Stat) {
+        stat.dev = 0;
+
+        let inner = self.inner.exclusive_access();
+        let inode = inner.inode.as_ref();
+
+        stat.ino = inode.ino() as u64;
+        stat.nlink = inode.nlink();
+
+        if inode.is_dir() {
+            stat.mode = StatMode::DIR;
+        } else {
+            stat.mode = StatMode::FILE;
+        }
     }
 }
