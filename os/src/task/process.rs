@@ -23,6 +23,29 @@ pub struct ProcessControlBlock {
     inner: UPSafeCell<ProcessControlBlockInner>,
 }
 
+#[derive(Clone)]
+pub struct DeadLockDetectInner {
+    pub available: Vec<usize>,
+    pub allocation: Vec<Vec<usize>>,
+    pub need: Vec<Vec<usize>>,
+}
+
+impl Default for DeadLockDetectInner {
+    fn default() -> Self {
+        DeadLockDetectInner {
+            available: Vec::new(),
+            allocation: vec![vec![]],
+            need: vec![vec![]],
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct DeadLockDetectData {
+    pub mutex: DeadLockDetectInner,
+    pub semaphore: DeadLockDetectInner,
+}
+
 /// Inner of Process Control Block
 pub struct ProcessControlBlockInner {
     /// is zombie?
@@ -49,6 +72,8 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// detect deadlocks?
+    pub deadlock_detect: Option<DeadLockDetectData>,
 }
 
 impl ProcessControlBlockInner {
@@ -119,6 +144,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect: None,
                 })
             },
         });
@@ -245,6 +271,7 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect: parent.deadlock_detect.clone(),
                 })
             },
         });
@@ -281,5 +308,206 @@ impl ProcessControlBlock {
     /// get pid
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+}
+
+fn do_check_can_lock(
+    mut work: Vec<usize>,
+    need: Vec<Vec<usize>>,
+    allocation: &Vec<Vec<usize>>,
+) -> bool {
+    let mut finish = vec![false; need.len()];
+
+    loop {
+        match finish
+            .iter_mut()
+            .enumerate()
+            .find(|(thd, &mut fin)| !fin && need[*thd].iter().zip(work.iter()).all(|(n, w)| n <= w))
+        {
+            Some((thd, finish)) => {
+                work.iter_mut()
+                    .zip(allocation[thd].iter())
+                    .for_each(|(w, a)| {
+                        *w += a;
+                    });
+
+                *finish = true;
+                thd
+            }
+            None => return finish.iter().all(|&x| x),
+        };
+    }
+}
+
+impl ProcessControlBlock {
+    fn check_can_lock(
+        &self,
+        lock_inner: &mut DeadLockDetectInner,
+        tid: usize,
+        lock_id: usize,
+    ) -> bool {
+        let work = lock_inner.available.clone();
+        let mut need = lock_inner.need.clone();
+        need[tid][lock_id] += 1;
+
+        let can = do_check_can_lock(work, need, &lock_inner.allocation);
+
+        if can {
+            lock_inner.need[tid][lock_id] += 1;
+        }
+
+        can
+    }
+
+    pub fn check_sem_lock(&self, tid: usize, sem_id: usize) -> bool {
+        let mut inner = self.inner_exclusive_access();
+        match &mut inner.deadlock_detect {
+            None => true,
+            Some(data) => self.check_can_lock(&mut data.semaphore, tid, sem_id),
+        }
+    }
+
+    pub fn check_mutex_lock(&self, tid: usize, mutex_id: usize) -> bool {
+        let mut inner = self.inner_exclusive_access();
+        match &mut inner.deadlock_detect {
+            None => true,
+            Some(data) => self.check_can_lock(&mut data.mutex, tid, mutex_id),
+        }
+    }
+
+    pub fn perform_lock(&self, lock_inner: &mut DeadLockDetectInner, tid: usize, lock_id: usize) {
+        lock_inner.need[tid][lock_id] -= 1;
+        lock_inner.allocation[tid][lock_id] += 1;
+
+        lock_inner.available[lock_id] -= 1;
+    }
+
+    pub fn perform_unlock(&self, lock_inner: &mut DeadLockDetectInner, tid: usize, lock_id: usize) {
+        lock_inner.allocation[tid][lock_id] -= 1;
+        lock_inner.available[lock_id] += 1;
+    }
+
+    pub fn perform_mutex_lock(&self, tid: usize, mutex_id: usize) {
+        let mut inner = self.inner_exclusive_access();
+        if inner.deadlock_detect.is_none() {
+            return;
+        }
+
+        let data = inner.deadlock_detect.as_mut().unwrap();
+
+        self.perform_lock(&mut data.mutex, tid, mutex_id);
+    }
+
+    pub fn perform_sem_lock(&self, tid: usize, sem_id: usize) {
+        let mut inner = self.inner_exclusive_access();
+        if inner.deadlock_detect.is_none() {
+            return;
+        }
+
+        let data = inner.deadlock_detect.as_mut().unwrap();
+
+        self.perform_lock(&mut data.semaphore, tid, sem_id);
+    }
+
+    pub fn perform_mutex_unlock(&self, tid: usize, mutex_id: usize) {
+        let mut inner = self.inner_exclusive_access();
+        if inner.deadlock_detect.is_none() {
+            return;
+        }
+
+        let data = inner.deadlock_detect.as_mut().unwrap();
+
+        self.perform_unlock(&mut data.mutex, tid, mutex_id);
+    }
+
+    pub fn perform_sem_unlock(&self, tid: usize, sem_id: usize) {
+        let mut inner = self.inner_exclusive_access();
+        if inner.deadlock_detect.is_none() {
+            return;
+        }
+
+        let data = inner.deadlock_detect.as_mut().unwrap();
+
+        self.perform_unlock(&mut data.semaphore, tid, sem_id);
+    }
+
+    pub fn create_mutex(&self, mutex_id: usize) {
+        let mut inner = self.inner_exclusive_access();
+
+        if inner.deadlock_detect.is_none() {
+            return;
+        }
+
+        let data = inner.deadlock_detect.as_mut().unwrap();
+
+        if data.mutex.available.len() <= mutex_id {
+            data.mutex.available.resize(mutex_id + 1, 0);
+        }
+
+        data.mutex.available[mutex_id] = 1;
+        data.mutex.allocation.iter_mut().for_each(|x| {
+            if x.len() <= mutex_id {
+                x.resize(mutex_id + 1, 0);
+            }
+        });
+        data.mutex.need.iter_mut().for_each(|x| {
+            if x.len() <= mutex_id {
+                x.resize(mutex_id + 1, 0);
+            }
+        });
+    }
+
+    pub fn create_sem(&self, sem_id: usize, res_count: usize) {
+        let mut inner = self.inner_exclusive_access();
+
+        if inner.deadlock_detect.is_none() {
+            return;
+        }
+
+        let data = inner.deadlock_detect.as_mut().unwrap();
+
+        if data.semaphore.available.len() <= sem_id {
+            data.semaphore.available.resize(sem_id + 1, 0);
+        }
+
+        data.semaphore.available[sem_id] = res_count;
+
+        data.semaphore.allocation.iter_mut().for_each(|x| {
+            if x.len() <= sem_id {
+                x.resize(sem_id + 1, 0);
+            }
+        });
+
+        data.semaphore.need.iter_mut().for_each(|x| {
+            if x.len() <= sem_id {
+                x.resize(sem_id + 1, 0);
+            }
+        });
+    }
+
+    pub fn new_thread_deadlock_detector(&self, new_tid: usize) {
+        let mut inner = self.inner_exclusive_access();
+
+        if let Some(data) = &mut inner.deadlock_detect {
+            if data.mutex.allocation.len() <= new_tid {
+                let size = data.mutex.allocation.first().unwrap().len();
+                data.mutex.allocation.resize(new_tid+1, vec![0; size]);
+            }
+
+            if data.mutex.need.len() <= new_tid {
+                let size = data.mutex.need.first().unwrap().len();
+                data.mutex.need.resize(new_tid+1, vec![0; size]);
+            }
+
+            if data.semaphore.allocation.len() <= new_tid {
+                let size = data.semaphore.allocation.first().unwrap().len();
+                data.semaphore.allocation.resize(new_tid+1, vec![0; size]);
+            }
+
+            if data.semaphore.need.len() <= new_tid {
+                let size = data.semaphore.need.first().unwrap().len();
+                data.semaphore.need.resize(new_tid+1, vec![0; size]);
+            }
+        }
     }
 }

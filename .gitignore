@@ -22,3 +22,5 @@ pushall.sh
 
 user/
 ci-user/
+
+*.swp

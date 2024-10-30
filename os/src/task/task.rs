@@ -41,6 +41,8 @@ pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     /// It is set when active exit or execution error occurs
     pub exit_code: Option<i32>,
+
+    pub start_time: Option<usize>,
 }
 
 impl TaskControlBlockInner {
@@ -75,6 +77,7 @@ impl TaskControlBlock {
                     task_cx: TaskContext::goto_trap_return(kstack_top),
                     task_status: TaskStatus::Ready,
                     exit_code: None,
+                    start_time: None,
                 })
             },
         }
@@ -90,4 +93,13 @@ pub enum TaskStatus {
     Running,
     /// blocked
     Blocked,
+}
+
+impl TaskControlBlock {
+    /// Get the TID of the current thread
+    ///
+    /// Acquires the lock
+    pub fn gettid(&self) -> usize {
+        self.inner_exclusive_access().res.as_ref().unwrap().tid
+    }
 }

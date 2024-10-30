@@ -1,11 +1,14 @@
+use core::mem::MaybeUninit;
+
 use crate::{
     config::MAX_SYSCALL_NUM,
     fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
+    mm::{translated_byte_buffer, translated_ref, translated_refmut, translated_str},
     task::{
         current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
         suspend_current_and_run_next, SignalFlags, TaskStatus,
     },
+    timer::get_time_us,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
 
@@ -162,12 +165,33 @@ pub fn sys_kill(pid: usize, signal: u32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().process.upgrade().unwrap().getpid()
-    );
-    -1
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    let current = current_task().unwrap();
+    let inner = current.inner_exclusive_access();
+
+    let mut timeval: MaybeUninit<TimeVal> = MaybeUninit::uninit();
+
+    let cur_time = get_time_us();
+    let elapsed = cur_time - inner.start_time.unwrap();
+
+    timeval.write(TimeVal {
+        sec: elapsed / 1_000_000,
+        usec: elapsed % 1_000_000,
+    });
+
+    translated_byte_buffer(
+        current_user_token(),
+        ts as *const _,
+        core::mem::size_of::<TimeVal>(),
+    )
+    .into_iter()
+    .flatten()
+    .enumerate()
+    .for_each(|(idx, byte)| {
+        *byte = unsafe { (timeval.as_ptr() as *const u8).offset(idx as isize).read() };
+    });
+
+    0
 }
 
 /// task_info syscall
